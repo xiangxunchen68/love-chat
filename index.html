@@ -81,6 +81,8 @@
 
   #viewer { position:fixed; inset:0; background:rgba(0,0,0,.9); display:flex; align-items:center; justify-content:center; z-index:9; }
   #viewer img { max-width:100%; max-height:100%; }
+  #vBar { position:absolute; left:0; right:0; bottom:max(20px,env(safe-area-inset-bottom)); display:flex; justify-content:center; align-items:center; gap:12px; color:#fff; font-size:13px; }
+  #vDl { background:rgba(255,255,255,.9); color:#333; border:0; border-radius:16px; padding:8px 16px; font-size:14px; }
 
   /* 確認視窗 */
   .cfm { position:fixed; inset:0; z-index:11; background:rgba(0,0,0,.4); display:flex; align-items:center; justify-content:center; }
@@ -133,7 +135,7 @@
   <div id="replyBar" hidden><span id="replyText"></span><button id="replyX" title="取消回覆">✕</button></div>
   <div id="stickers" hidden></div>
   <footer>
-    <label class="icon" title="照片/影片">📷<input type="file" accept="image/*,video/*" id="file" hidden></label>
+    <label class="icon" title="照片/影片">📷<input type="file" accept="image/*,video/*" id="file" multiple hidden></label>
     <label class="icon" title="檔案">📎<input type="file" id="anyFile" hidden></label>
     <button class="icon" id="stkBtn" title="貼圖">😊</button>
     <textarea id="input" rows="1" placeholder="說點什麼…"></textarea>
@@ -153,7 +155,7 @@
   </div>
 </div>
 
-<div id="viewer" hidden><img alt=""></div>
+<div id="viewer" hidden><img alt=""><div id="vBar"><span id="vInfo"></span><button id="vDl" hidden>下載原圖</button></div></div>
 <div id="toast" hidden></div>
 
 <script type="module">
@@ -230,8 +232,41 @@ function confirmBox(text, okText, onOk) {
   o.onclick = () => { w.remove(); onOk(); };
   document.body.appendChild(w);
 }
-function view(src) { $("viewer").querySelector("img").src = src; $("viewer").hidden = false; }
-$("viewer").onclick = () => { $("viewer").hidden = true; };
+// 看照片：先顯示小圖，有原圖的話再換成原圖，可以下載
+let viewToken = 0;
+async function view(src, orig) {
+  const v = $("viewer"), im = v.querySelector("img"), tok = ++viewToken;
+  im.src = src; v.hidden = false; $("vDl").hidden = true; $("vInfo").textContent = "";
+  if (!orig || !window.LCX) return;
+  $("vInfo").textContent = "載入原圖中…";
+  try {
+    const url = await window.LCX.getBlobUrl(orig, true);
+    if (tok !== viewToken || v.hidden) return;
+    im.src = url;
+    $("vInfo").textContent = "原圖 " + (orig.size > 1048576 ? (orig.size / 1048576).toFixed(1) + " MB" : Math.round(orig.size / 1024) + " KB");
+    $("vDl").hidden = false;
+    $("vDl").onclick = e => {
+      e.stopPropagation();
+      const a = document.createElement("a"); a.href = url; a.download = orig.name || "photo.jpg";
+      document.body.append(a); a.click(); a.remove();
+    };
+  } catch { if (tok === viewToken) $("vInfo").textContent = "原圖載入失敗"; }
+}
+$("viewer").onclick = e => { if (e.target.id === "vDl") return; $("viewer").hidden = true; viewToken++; };
+
+// 聊天背景（存在共用設定裡，兩個人一起變）
+let bgData = null, bgFade = 0.45;
+function applyBg(bg, fade) {
+  bgData = bg || null;
+  if (fade !== undefined && fade !== null) bgFade = fade;
+  const l = $("list");
+  if (!bgData) { l.style.backgroundImage = ""; return; }
+  const ov = "rgba(255,255,255," + bgFade + ")";
+  l.style.backgroundImage = "linear-gradient(" + ov + "," + ov + "),url(\"" + bgData + "\")";
+  l.style.backgroundSize = "auto, 450px auto";
+  l.style.backgroundRepeat = "repeat";
+  l.style.backgroundAttachment = "local";
+}
 
 // ---------- 登入 ----------
 $("loginBtn").onclick = async () => {
@@ -295,7 +330,7 @@ function makeRow(id, m) {
   if (m.img) {
     b.classList.add("photo");
     const img = new Image(); img.src = m.img; img.loading = "lazy";
-    img.onclick = () => view(m.img);
+    img.onclick = () => view(m.img, m.orig);
     b.appendChild(img);
   } else if (m.stkImg) {
     b.classList.add("stkimg");
@@ -393,6 +428,7 @@ function startChat() {
     const d = s.data() || {};
     if (d.start) showDays(d.start);
     if (d.color !== undefined && d.color !== null) applyColor(d.color);
+    applyBg(d.bg || null, d.bgFade);
     pin = d.pin || null;
     $("pin").hidden = !pin;
     if (pin) $("pinText").textContent = "📢 " + pin.text;
@@ -519,14 +555,18 @@ function drawStickers() {
 drawStickers();
 $("stkBtn").onclick = () => { stk.hidden = !stk.hidden; };
 
-// 照片和影片：照片自動壓縮，影片切塊存（上限 15 MB）
+// 照片和影片：照片聊天室裡放小圖，同時保留原圖；影片切塊存（上限 15 MB）；可以一次選很多張
 $("file").onchange = async e => {
-  const f = e.target.files[0]; e.target.value = "";
-  if (!f) return;
-  if (f.type.startsWith("video/")) { if (window.LCX) window.LCX.sendFile(f); return; }
-  toast("照片處理中…");
-  try { send({ img: await compress(f) }); }
-  catch { toast("這張照片讀不了"); }
+  const fs = Array.from(e.target.files); e.target.value = "";
+  for (const f of fs) {
+    if (f.type.startsWith("video/")) { if (window.LCX) await window.LCX.sendFile(f); continue; }
+    try {
+      toast("照片處理中…");
+      const pre = await compress(f);
+      const orig = window.LCX ? await window.LCX.uploadOriginal(f) : null;
+      await send(orig ? { img: pre, orig: orig } : { img: pre });
+    } catch { toast("這張照片讀不了"); }
+  }
 };
 $("anyFile").onchange = e => {
   const f = e.target.files[0]; e.target.value = "";
@@ -722,9 +762,10 @@ window.LC = {
   get nick() { return nick; },
   send: send, toast: toast, confirmBox: confirmBox, compress: compress, view: view,
   preview: preview, who: who, setReply: setReply, applyColor: applyColor, showDays: showDays,
+  get bg() { return bgData; }, get bgFade() { return bgFade; }, applyBg: applyBg,
   signOut: () => signOut(auth)
 };
 </script>
-<script type="module" src="extras.js?v=2"></script>
+<script type="module" src="extras.js?v=3"></script>
 </body>
 </html>
