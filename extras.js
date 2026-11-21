@@ -494,25 +494,52 @@ function stickerImg(file) {
     img.src = URL.createObjectURL(file);
   });
 }
+function stickerSetFromName(name) {
+  const m = /^\d+_[A-Z]?(.+?)\.[a-z0-9]+$/i.exec(name || "");
+  return m ? m[1] : "";
+}
 function stickerPanel() {
   const pick = h("input", { type: "file", accept: "image/*", multiple: "", hidden: "" });
   const pn = panel("我們的表情包", h("button", { onclick: () => pick.click() }, "＋ 上傳"));
-  const grid = h("div", { class: "pgrid" });
-  pn.body.append(pick, h("p", { class: "hint" }, "上傳的圖片會變成你們兩個都能用的貼圖，去背的 PNG 效果最好。\n在聊天室按 😊 就能用。"), grid);
+  const setIn = h("input", { class: "fld", placeholder: "分類名稱（例如：柯基）", list: "stkSets" });
+  const dl = h("datalist", { id: "stkSets" });
+  const groupsBox = h("div");
+  pn.body.append(pick,
+    h("div", { class: "lbl" }, "上傳到哪個分類"), setIn, dl,
+    h("p", { class: "hint" }, "沒填的話，會用檔名自動分類，或放進「我的貼圖」。\n去背的 PNG 效果最好，兩個人都能用。"),
+    groupsBox);
   pick.onchange = async () => {
     const fs = Array.from(pick.files); pick.value = "";
+    const typed = setIn.value.trim().slice(0, 20);
     for (let i = 0; i < fs.length; i++) {
       toast("上傳中 " + (i + 1) + "/" + fs.length);
-      try { await addDoc(collection(db, "stickers"), { img: await stickerImg(fs[i]), uid: LC.me.uid, ts: serverTimestamp() }); }
+      const set = typed || stickerSetFromName(fs[i].name) || "我的貼圖";
+      try { await addDoc(collection(db, "stickers"), { img: await stickerImg(fs[i]), set: set, uid: LC.me.uid, ts: serverTimestamp() }); }
       catch (e) { toast("有一張上傳失敗"); }
     }
     toast("新增完成");
   };
   pn.onClose(onSnapshot(query(collection(db, "stickers"), orderBy("ts")), snap => {
-    grid.replaceChildren.apply(grid, snap.docs.map(d => h("div", { class: "stk" },
-      h("img", { src: d.data().img }),
-      h("button", { onclick: () => confirmBox("要刪除這個表情包嗎？", "刪除", () => deleteDoc(d.ref)) }, "✕"))));
-    if (snap.empty) grid.append(h("p", { class: "empty", style: "grid-column:1/-1" }, "還沒有表情包，按右上角上傳"));
+    const groups = new Map();
+    snap.docs.forEach(d => { const k = d.data().set || "我的貼圖"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); });
+    dl.replaceChildren.apply(dl, Array.from(groups.keys()).map(k => h("option", { value: k })));
+    groupsBox.replaceChildren();
+    if (!groups.size) groupsBox.append(h("p", { class: "empty" }, "還沒有表情包，按右上角上傳"));
+    groups.forEach((docs, name) => {
+      groupsBox.append(
+        h("div", { class: "row2", style: "justify-content:space-between;align-items:center;margin-top:18px" },
+          h("b", {}, name + "（" + docs.length + "）"),
+          h("span", { class: "row2", style: "margin:0" },
+            h("button", { class: "btn ghost", style: "padding:4px 10px;font-size:13px", onclick: () => form("分類改名", [["name", "新的分類名稱"]], { name: name }, async v => {
+              if (!v.name) throw new Error("請輸入名稱");
+              await Promise.all(docs.map(d => updateDoc(d.ref, { set: v.name.slice(0, 20) })));
+            }) }, "改名"),
+            h("button", { class: "btn danger", style: "padding:4px 10px;font-size:13px", onclick: () => confirmBox("要刪除整組「" + name + "」的 " + docs.length + " 張貼圖嗎？", "刪除",
+              () => Promise.all(docs.map(d => deleteDoc(d.ref))).catch(() => toast("刪除失敗"))) }, "刪除整組"))),
+        h("div", { class: "pgrid", style: "grid-template-columns:repeat(4,1fr);margin-top:8px" }, docs.map(d => h("div", { class: "stk" },
+          h("img", { src: d.data().img }),
+          h("button", { onclick: () => confirmBox("要刪除這張貼圖嗎？", "刪除", () => deleteDoc(d.ref)) }, "✕")))));
+    });
   }, () => toast("讀取失敗")));
 }
 
