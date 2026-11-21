@@ -47,7 +47,7 @@
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; cursor:pointer; }
   .bubble.sticker { background:none; box-shadow:none; font-size:56px; padding:0; line-height:1.1; }
   .bubble.stkimg { background:none; box-shadow:none; padding:0; }
-  .bubble.stkimg img { width:120px; height:120px; object-fit:contain; display:block; }
+  .bubble.stkimg img { width:120px; height:120px; object-fit:contain; display:block; border-radius:14px; }
   .bubble.photo { padding:3px; }
   .bubble.photo img { display:block; max-width:100%; max-height:320px; border-radius:15px; cursor:zoom-in; }
   .bubble.filemsg { cursor:pointer; }
@@ -474,7 +474,10 @@ async function send(data, opts) {
     clearReply();
   }
   if (opts.silent) extra.silent = true;
-  try { await addDoc(collection(db, "messages"), Object.assign({}, data, extra, { uid: me.uid, ts: serverTimestamp() })); }
+  try {
+    await addDoc(collection(db, "messages"), Object.assign({}, data, extra, { uid: me.uid, ts: serverTimestamp() }));
+    if (!opts.silent && window.LCX && window.LCX.notify) window.LCX.notify(preview(data));   // 通知對方手機
+  }
   catch (e) { toast("傳送失敗：" + e.code); }
 }
 
@@ -763,9 +766,12 @@ window.LC = {
   send: send, toast: toast, confirmBox: confirmBox, compress: compress, view: view,
   preview: preview, who: who, setReply: setReply, applyColor: applyColor, showDays: showDays,
   get bg() { return bgData; }, get bgFade() { return bgFade; }, applyBg: applyBg,
+  getToken: () => auth.currentUser ? auth.currentUser.getIdToken() : Promise.reject(new Error("not signed in")),
   signOut: () => signOut(auth)
 };
+// 背景接收通知用
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 </script>
-<script type="module" src="extras.js?v=3"></script>
+<script type="module" src="extras.js?v=4"></script>
 </body>
 </html>
