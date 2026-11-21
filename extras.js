@@ -483,17 +483,19 @@ async function makeShot(rows) {
 
 // ---------- 表情包 ----------
 function stickerImg(file) {
+  // 不降畫質：700 KB 以內直接用原檔
+  if (file.size <= 700 * 1024) return new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file);
+  });
   return new Promise((res, rej) => {
     const img = new Image();
     img.onload = () => {
-      const s = Math.min(1, 320 / Math.max(img.width, img.height));
+      const s = Math.min(1, 512 / Math.max(img.width, img.height));
       const c = document.createElement("canvas");
       c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(img.src);
-      let out = c.toDataURL("image/webp", 0.85);
-      if (out.indexOf("data:image/webp") !== 0) out = c.toDataURL("image/png");
-      res(out);
+      res(c.toDataURL("image/png"));
     };
     img.onerror = rej;
     img.src = URL.createObjectURL(file);
@@ -511,7 +513,7 @@ function stickerPanel() {
   const groupsBox = h("div");
   pn.body.append(pick,
     h("div", { class: "lbl" }, "上傳到哪個分類"), setIn, dl,
-    h("p", { class: "hint" }, "沒填的話，會用檔名自動分類，或放進「我的貼圖」。\n去背的 PNG 效果最好，兩個人都能用。"),
+    h("p", { class: "hint" }, "沒填的話，會用檔名自動分類，或放進「我的貼圖」。\n原圖畫質不會被壓縮，兩個人都能用。"),
     groupsBox);
   pick.onchange = async () => {
     const fs = Array.from(pick.files); pick.value = "";
@@ -548,6 +550,48 @@ function stickerPanel() {
   }, () => toast("讀取失敗")));
 }
 
+// ---------- 手機通知（推播） ----------
+const PUSH_URL = "https://lovechat-push.xiangxunchen68.workers.dev";
+const VAPID_PUBLIC = "BEhijDtrKdYNC5paaiWLwlU0Dk1HAtXIgJZuNUup5Tlu9G4OtXDeGhoMNRLWBpp4Oo1A7xAM1Z3G_WwaNvqeQto";
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+function keyBytes(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "=";
+  const r = atob(s); const u = new Uint8Array(r.length);
+  for (let i = 0; i < r.length; i++) u[i] = r.charCodeAt(i);
+  return u;
+}
+async function subId(endpoint) {
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(endpoint));
+  return Array.from(new Uint8Array(b)).slice(0, 16).map(x => x.toString(16).padStart(2, "0")).join("");
+}
+async function enablePush() {
+  if (!pushSupported()) throw new Error(isIOS && !isStandalone() ? "iPhone 要先「加入主畫面」，再從圖示打開才能開通知" : "這個瀏覽器不支援通知");
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") throw new Error("通知被拒絕了，要到手機設定裡打開");
+  const reg = await navigator.serviceWorker.register("sw.js");
+  await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(VAPID_PUBLIC) });
+  await setDoc(doc(db, "pushSubs", await subId(sub.endpoint)), { uid: LC.me.uid, sub: JSON.stringify(sub), ua: navigator.userAgent.slice(0, 120), ts: Date.now() });
+}
+async function pushStatus() {
+  if (!pushSupported() || Notification.permission !== "granted") return "off";
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = reg && await reg.pushManager.getSubscription();
+  return sub ? "on" : "off";
+}
+async function notify(body) {
+  try {
+    const token = await LC.getToken();
+    await fetch(PUSH_URL + "/notify", {
+      method: "POST", headers: { "Content-Type": "application/json" }, keepalive: true,
+      body: JSON.stringify({ token: token, title: "勳貝的家 💕", body: String(body || "").slice(0, 150), tag: "msg" })
+    });
+  } catch (e) {}
+}
+
 // ---------- 設定 ----------
 function settings() {
   const pn = panel("設定");
@@ -572,6 +616,23 @@ function settings() {
     LC.applyColor(i);
     setDoc(doc(db, "settings", "main"), { color: i }, { merge: true }).catch(() => toast("儲存失敗"));
   } }))));
+
+  b.append(h("div", { class: "lbl" }, "手機通知"));
+  const pst = h("p", { class: "hint" }, "檢查中…");
+  const pbtn = h("button", { class: "btn" }, "開啟通知");
+  const refreshPush = async () => {
+    const st = await pushStatus().catch(() => "off");
+    pst.textContent = st === "on" ? "這支手機已經開啟通知 ✓ 對方傳訊息、打電話時會跳通知" :
+      (isIOS && !isStandalone() ? "iPhone 要先「分享 → 加入主畫面」，從主畫面的圖示打開，再回來按開啟" : "還沒開啟：按下面的按鈕，跳出詢問時選「允許」");
+    pbtn.textContent = st === "on" ? "重新連線通知" : "開啟通知";
+  };
+  pbtn.onclick = async () => {
+    pbtn.disabled = true;
+    try { await enablePush(); toast("通知開好了 🔔"); } catch (e) { toast(e.message || "開啟失敗"); }
+    pbtn.disabled = false; refreshPush();
+  };
+  b.append(pst, pbtn);
+  refreshPush();
 
   b.append(h("div", { class: "lbl" }, "聊天背景（兩個人會一起變）"));
   const bgPick = h("input", { type: "file", accept: "image/*", hidden: "" });
@@ -614,4 +675,4 @@ function settings() {
   b.append(h("button", { class: "btn danger", onclick: () => confirmBox("確定要登出嗎？", "登出", () => LC.signOut()) }, "登出"));
 }
 
-window.LCX = { openMenu: openMenu, msgMenu: msgMenu, renderFile: renderFile, sendFile: sendFile, addSticker: stickerPanel, getBlobUrl: getBlobUrl, uploadOriginal: uploadOriginal };
+window.LCX = { openMenu: openMenu, msgMenu: msgMenu, renderFile: renderFile, sendFile: sendFile, addSticker: stickerPanel, getBlobUrl: getBlobUrl, uploadOriginal: uploadOriginal, notify: notify };
