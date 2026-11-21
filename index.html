@@ -67,11 +67,17 @@
   #send { background:var(--pink); color:#fff; border:0; border-radius:18px; padding:9px 13px; font-size:15px; white-space:nowrap;
     -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
 
-  #stickers { display:grid; grid-template-columns:repeat(6,1fr); gap:4px; padding:8px; background:#fff; border-top:1px solid #f6d5dc;
-    max-height:40vh; overflow-y:auto; }
-  #stickers button { font-size:32px; background:none; border:0; padding:6px 0; }
-  #stickers img { width:100%; aspect-ratio:1; object-fit:contain; display:block; }
-  #stickers .add { font-size:26px; color:var(--muted); border:2px dashed #f3c2cc; border-radius:12px; }
+  #stickers { background:#fff; border-top:1px solid #f6d5dc; max-height:44vh; display:flex; flex-direction:column; }
+  .stkTabs { display:flex; gap:6px; overflow-x:auto; padding:6px 8px; border-bottom:1px solid #f6d5dc; flex-shrink:0; }
+  .stkTabs button { flex-shrink:0; display:flex; align-items:center; gap:4px; background:#f7f0f2; border:0; border-radius:14px;
+    padding:4px 10px; font-size:13px; color:var(--text); white-space:nowrap; }
+  .stkTabs button.on { background:var(--pink); color:#fff; }
+  .stkTabs button.add { background:#fff; color:var(--muted); border:1px dashed #f3c2cc; }
+  .stkTabs img { width:22px; height:22px; object-fit:contain; }
+  .stkGrid { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; padding:8px; overflow-y:auto; }
+  .stkGrid button { background:none; border:0; padding:2px; font-size:32px; }
+  .stkGrid img { width:100%; aspect-ratio:1; object-fit:contain; display:block; }
+  .stkEmpty { grid-column:1/-1; text-align:center; color:var(--muted); font-size:14px; }
 
   #viewer { position:fixed; inset:0; background:rgba(0,0,0,.9); display:flex; align-items:center; justify-content:center; z-index:9; }
   #viewer img { max-width:100%; max-height:100%; }
@@ -463,26 +469,52 @@ input.addEventListener("keydown", e => {
 function autoGrow() { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; }
 input.addEventListener("input", autoGrow);
 
-// 貼圖（自訂表情包在前面，最後一格是新增）
+// 貼圖：上面是分類分頁，下面是貼圖
 const stk = $("stickers");
+let stkTab = null;
+function recentStk() { try { return JSON.parse(localStorage.getItem("recentStk") || "[]"); } catch { return []; } }
+function pushRecent(id) {
+  try { const r = recentStk().filter(x => x !== id); r.unshift(id); localStorage.setItem("recentStk", JSON.stringify(r.slice(0, 16))); } catch {}
+}
 function drawStickers() {
-  stk.replaceChildren();
-  customStk.forEach(c => {
+  const byId = new Map(customStk.map(c => [c.id, c]));
+  const groups = new Map();
+  customStk.forEach(c => { const k = c.set || "我的貼圖"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); });
+  const tabs = [];
+  const recent = recentStk().map(id => byId.get(id)).filter(Boolean);
+  if (recent.length) tabs.push({ name: "最近", icon: "🕘", items: recent });
+  groups.forEach((items, name) => tabs.push({ name: name, img: items[0].img, items: items }));
+  if (STICKERS.length) tabs.push({ name: "表情", icon: "😊", items: STICKERS });
+  if (!tabs.some(t => t.name === stkTab)) { const first = tabs.find(t => t.name !== "最近") || tabs[0]; stkTab = first ? first.name : null; }
+
+  const bar = document.createElement("div"); bar.className = "stkTabs";
+  tabs.forEach(t => {
     const b = document.createElement("button");
-    const img = new Image(); img.src = c.img; b.append(img);
-    b.onclick = () => { send({ stkImg: c.img }); stk.hidden = true; };
-    stk.appendChild(b);
-  });
-  STICKERS.forEach(s => {
-    const b = document.createElement("button");
-    b.textContent = s;
-    b.onclick = () => { send({ sticker: s }); stk.hidden = true; };
-    stk.appendChild(b);
+    if (t.name === stkTab) b.className = "on";
+    if (t.img) { const im = new Image(); im.src = t.img; b.append(im); } else b.append(t.icon);
+    b.append(t.name);
+    b.onclick = () => { stkTab = t.name; drawStickers(); };
+    bar.appendChild(b);
   });
   const add = document.createElement("button");
-  add.className = "add"; add.textContent = "＋"; add.title = "新增自己的表情包";
+  add.className = "add"; add.textContent = "＋ 管理";
   add.onclick = () => { stk.hidden = true; if (window.LCX) window.LCX.addSticker(); };
-  stk.appendChild(add);
+  bar.appendChild(add);
+
+  const grid = document.createElement("div"); grid.className = "stkGrid";
+  const cur = tabs.find(t => t.name === stkTab);
+  if (!cur) {
+    const p = document.createElement("p"); p.className = "stkEmpty"; p.textContent = "還沒有貼圖，按上面的「＋ 管理」上傳"; grid.appendChild(p);
+  } else cur.items.forEach(c => {
+    const b = document.createElement("button");
+    if (typeof c === "string") { b.textContent = c; b.onclick = () => { send({ sticker: c }); stk.hidden = true; }; }
+    else {
+      const im = new Image(); im.src = c.img; im.loading = "lazy"; b.append(im);
+      b.onclick = () => { pushRecent(c.id); send({ stkImg: c.img }); stk.hidden = true; drawStickers(); };
+    }
+    grid.appendChild(b);
+  });
+  stk.replaceChildren(bar, grid);
 }
 drawStickers();
 $("stkBtn").onclick = () => { stk.hidden = !stk.hidden; };
@@ -693,6 +725,6 @@ window.LC = {
   signOut: () => signOut(auth)
 };
 </script>
-<script type="module" src="extras.js?v=1"></script>
+<script type="module" src="extras.js?v=2"></script>
 </body>
 </html>
