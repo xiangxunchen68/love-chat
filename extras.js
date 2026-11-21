@@ -1,5 +1,5 @@
 // 勳貝的家：選單、訊息長按功能、相簿、記事本、行事曆、活動、Keep、表情包、設定
-import { collection, addDoc, doc, setDoc, getDocs, deleteDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp }
+import { collection, addDoc, doc, setDoc, getDocs, deleteDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp, Bytes }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const LC = window.LC;
@@ -123,39 +123,43 @@ function photos() {
   const pn = panel("照片");
   const imgs = allMsgs().filter(m => m.img).reverse();
   if (!imgs.length) { pn.body.append(h("p", { class: "empty" }, "聊天裡還沒有照片")); return; }
-  pn.body.append(h("div", { class: "pgrid" }, imgs.map(m => h("img", { src: m.img, loading: "lazy", onclick: () => LC.view(m.img) }))));
+  pn.body.append(h("div", { class: "pgrid" }, imgs.map(m => h("img", { src: m.img, loading: "lazy", onclick: () => LC.view(m.img, m.orig) }))));
 }
 
-// ---------- 影片和檔案（切成小塊存進資料庫，上限 15 MB） ----------
-const MAX = 15 * 1024 * 1024, CH = 512 * 1024;
-function b64(u8) {
-  let s = "";
-  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
-  return btoa(s);
+// ---------- 影片、檔案和原圖（切成小塊、用原始位元組存進資料庫，上限 15 MB） ----------
+const MAX = 15 * 1024 * 1024, CH = 900 * 1024;
+const keepOriginal = () => { try { return localStorage.getItem("keepOrig") !== "0"; } catch (e) { return true; } };
+async function uploadChunks(f, label) {
+  const ref = doc(collection(db, "files"));
+  const buf = new Uint8Array(await f.arrayBuffer());
+  const n = Math.max(1, Math.ceil(buf.length / CH));
+  for (let i = 0; i < n; i++) {
+    toast(label + " " + Math.round(i / n * 100) + "%");
+    await setDoc(doc(db, "files", ref.id, "chunks", String(i).padStart(4, "0")), { b: Bytes.fromUint8Array(buf.slice(i * CH, (i + 1) * CH)) });
+  }
+  const meta = { id: ref.id, name: f.name || "檔案", size: f.size, type: f.type || "application/octet-stream", n: n };
+  await setDoc(ref, Object.assign({}, meta, { uid: LC.me.uid, ts: serverTimestamp() }));
+  return meta;
 }
 async function sendFile(f) {
   if (f.size > MAX) { toast("檔案太大了，上限 15 MB"); return; }
-  try {
-    const ref = doc(collection(db, "files"));
-    const buf = new Uint8Array(await f.arrayBuffer());
-    const n = Math.max(1, Math.ceil(buf.length / CH));
-    for (let i = 0; i < n; i++) {
-      toast("上傳中 " + Math.round(i / n * 100) + "%");
-      await setDoc(doc(db, "files", ref.id, "chunks", String(i).padStart(4, "0")), { d: b64(buf.subarray(i * CH, (i + 1) * CH)) });
-    }
-    const meta = { id: ref.id, name: f.name || "檔案", size: f.size, type: f.type || "application/octet-stream", n: n };
-    await setDoc(ref, Object.assign({}, meta, { uid: LC.me.uid, ts: serverTimestamp() }));
-    await LC.send({ file: meta });
-    toast("已傳送");
-  } catch (e) { toast("上傳失敗"); }
+  try { const meta = await uploadChunks(f, "上傳中"); await LC.send({ file: meta }); toast("已傳送"); }
+  catch (e) { toast("上傳失敗"); }
+}
+async function uploadOriginal(f) {
+  if (!keepOriginal()) return null;
+  if (f.size > MAX) { toast("原圖超過 15 MB，這張只傳一般畫質"); return null; }
+  try { return await uploadChunks(f, "上傳原圖"); } catch (e) { toast("原圖上傳失敗，改傳一般畫質"); return null; }
 }
 const blobCache = new Map();
-async function getBlobUrl(meta) {
+async function getBlobUrl(meta, quiet) {
   if (blobCache.has(meta.id)) return blobCache.get(meta.id);
-  toast("下載中…");
+  if (!quiet) toast("下載中…");
   const snap = await getDocs(collection(db, "files", meta.id, "chunks"));
   const parts = snap.docs.sort((a, b) => a.id.localeCompare(b.id)).map(d => {
-    const s = atob(d.data().d); const u = new Uint8Array(s.length);
+    const x = d.data();
+    if (x.b) return x.b.toUint8Array();
+    const s = atob(x.d); const u = new Uint8Array(s.length);
     for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
     return u;
   });
@@ -224,13 +228,13 @@ function album(id, a) {
     const fs = Array.from(pick.files); pick.value = "";
     for (let i = 0; i < fs.length; i++) {
       toast("上傳中 " + (i + 1) + "/" + fs.length);
-      try { await addDoc(collection(db, "albums", id, "photos"), { img: await LC.compress(fs[i]), uid: LC.me.uid, ts: serverTimestamp() }); }
+      try { const pre = await LC.compress(fs[i]); const orig = await uploadOriginal(fs[i]); await addDoc(collection(db, "albums", id, "photos"), orig ? { img: pre, orig: orig, uid: LC.me.uid, ts: serverTimestamp() } : { img: pre, uid: LC.me.uid, ts: serverTimestamp() }); }
       catch (e) { toast("有一張照片上傳失敗"); }
     }
     toast("完成");
   };
   pn.onClose(onSnapshot(query(collection(db, "albums", id, "photos"), orderBy("ts")), snap => {
-    grid.replaceChildren.apply(grid, snap.docs.map(d => h("img", { src: d.data().img, loading: "lazy", onclick: () => LC.view(d.data().img) })));
+    grid.replaceChildren.apply(grid, snap.docs.map(d => h("img", { src: d.data().img, loading: "lazy", onclick: () => LC.view(d.data().img, d.data().orig) })));
     if (snap.empty) grid.append(h("p", { class: "empty", style: "grid-column:1/-1" }, "按右上角加照片"));
     if (!snap.metadata.hasPendingWrites && snap.size !== count) { count = snap.size; updateDoc(doc(db, "albums", id), { count: count }).catch(() => {}); }
   }, () => toast("讀取失敗")));
@@ -351,7 +355,7 @@ function links() {
 // ---------- Keep ----------
 async function keep(m) {
   const data = { uid: m.uid, ms: m.ms, at: Date.now() };
-  ["text", "img", "stkImg", "sticker", "file"].forEach(k => { if (m[k]) data[k] = m[k]; });
+  ["text", "img", "orig", "stkImg", "sticker", "file"].forEach(k => { if (m[k]) data[k] = m[k]; });
   try { await addDoc(collection(db, "users", LC.me.uid, "keep"), data); toast("已存到 Keep"); } catch (e) { toast("儲存失敗"); }
 }
 function keepPanel() {
@@ -362,7 +366,7 @@ function keepPanel() {
     snap.forEach(d => {
       const k = d.data(), c = h("div", { class: "card", style: "cursor:default" });
       const pic = k.img || k.stkImg;
-      if (pic) c.append(h("img", { src: pic, style: "max-width:100%;max-height:240px;border-radius:10px;display:block;cursor:zoom-in", onclick: () => LC.view(pic) }));
+      if (pic) c.append(h("img", { src: pic, style: "max-width:100%;max-height:240px;border-radius:10px;display:block;cursor:zoom-in", onclick: () => LC.view(pic, k.orig) }));
       else if (k.file) c.append(h("div", { class: "t", style: "cursor:pointer", onclick: () => openFile(k.file) }, (isVideo(k.file) ? "🎬 " : "📄 ") + k.file.name));
       else c.append(h("div", { style: "white-space:pre-wrap;word-break:break-word" }, k.text || k.sticker || ""));
       c.append(h("div", { class: "row2", style: "justify-content:space-between;align-items:center" },
@@ -417,7 +421,8 @@ async function share(m) {
       return;
     }
     let blob, name;
-    if (m.img || m.stkImg) { blob = await (await fetch(m.img || m.stkImg)).blob(); name = "photo." + (blob.type.split("/")[1] || "jpg"); }
+    if (m.orig) { blob = await (await fetch(await getBlobUrl(m.orig, true))).blob(); name = m.orig.name || "photo.jpg"; }
+    else if (m.img || m.stkImg) { blob = await (await fetch(m.img || m.stkImg)).blob(); name = "photo." + (blob.type.split("/")[1] || "jpg"); }
     else if (m.file) { blob = await (await fetch(await getBlobUrl(m.file))).blob(); name = m.file.name; }
     else return;
     const f = new File([blob], name, { type: blob.type });
@@ -568,6 +573,35 @@ function settings() {
     setDoc(doc(db, "settings", "main"), { color: i }, { merge: true }).catch(() => toast("儲存失敗"));
   } }))));
 
+  b.append(h("div", { class: "lbl" }, "聊天背景（兩個人會一起變）"));
+  const bgPick = h("input", { type: "file", accept: "image/*", hidden: "" });
+  bgPick.onchange = async () => {
+    const f = bgPick.files[0]; bgPick.value = ""; if (!f) return;
+    toast("背景處理中…");
+    try {
+      let data;
+      if (f.size < 650 * 1024) data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
+      else data = await LC.compress(f);
+      await setDoc(doc(db, "settings", "main"), { bg: data }, { merge: true });
+      toast("背景換好了");
+    } catch (e) { toast("背景上傳失敗"); }
+  };
+  const fade = h("input", { type: "range", min: "0", max: "0.8", step: "0.05", style: "width:100%" });
+  fade.value = String(LC.bgFade);
+  fade.oninput = () => LC.applyBg(LC.bg, Number(fade.value));
+  fade.onchange = () => setDoc(doc(db, "settings", "main"), { bgFade: Number(fade.value) }, { merge: true }).catch(() => toast("儲存失敗"));
+  b.append(bgPick, h("div", { class: "row2" },
+    h("button", { class: "btn", onclick: () => bgPick.click() }, "上傳背景圖"),
+    h("button", { class: "btn danger", onclick: () => confirmBox("要拿掉聊天背景嗎？", "拿掉", () => setDoc(doc(db, "settings", "main"), { bg: null }, { merge: true })) }, "拿掉背景")),
+    h("p", { class: "hint" }, "背景淡化（往右越淡，字越好讀）"), fade);
+
+  b.append(h("div", { class: "lbl" }, "照片畫質"));
+  const ko = h("input", { type: "checkbox", style: "width:20px;height:20px;vertical-align:middle;margin-right:8px" });
+  ko.checked = keepOriginal();
+  ko.onchange = () => { try { localStorage.setItem("keepOrig", ko.checked ? "1" : "0"); } catch (e) {} toast(ko.checked ? "之後的照片會保留原圖" : "之後的照片只傳一般畫質"); };
+  b.append(h("label", { class: "card", style: "display:block;cursor:pointer" }, ko, "傳照片時保留原圖（點開照片就是原始畫質）"),
+    h("p", { class: "hint" }, "原圖比較佔空間：免費空間大約可以放 200～300 張原圖，滿了之後新的東西會傳不上去。"));
+
   b.append(h("div", { class: "lbl" }, "表情包"));
   b.append(h("button", { class: "btn ghost", onclick: stickerPanel }, "管理我們的表情包"));
 
@@ -580,4 +614,4 @@ function settings() {
   b.append(h("button", { class: "btn danger", onclick: () => confirmBox("確定要登出嗎？", "登出", () => LC.signOut()) }, "登出"));
 }
 
-window.LCX = { openMenu: openMenu, msgMenu: msgMenu, renderFile: renderFile, sendFile: sendFile, addSticker: stickerPanel };
+window.LCX = { openMenu: openMenu, msgMenu: msgMenu, renderFile: renderFile, sendFile: sendFile, addSticker: stickerPanel, getBlobUrl: getBlobUrl, uploadOriginal: uploadOriginal };
