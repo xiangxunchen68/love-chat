@@ -1,0 +1,8 @@
+{
+  "name": "我們的小窩",
+  "short_name": "小窩",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#fff5f7",
+  "theme_color": "#ff8fa3"
+}
